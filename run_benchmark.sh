@@ -15,10 +15,12 @@ DATASET="aws-bench-quickstart"
 DATASET_GIT_URL="https://github.com/aws-bench/aws-bench-datasets.git"
 ENV_NAME="aws-bench-env"
 
-# Local clone of the dataset repo — tasks/<scenario>/<task>/ is used for --path.
+# Local clone of the dataset repo — tasks/<scenario>/<task>/ is used for --path,
+# scenarios/ is used for --scenario-path.
 # On first run the repo is cloned; subsequent runs do a git pull.
 DATASET_REPO_DIR="${HOME}/.aws-bench/datasets-repo"
 DATASET_TASKS_DIR="${DATASET_REPO_DIR}/tasks"
+DATASET_SCENARIOS_DIR="${DATASET_REPO_DIR}/scenarios"
 
 # Parse flags and positional category names
 SKIP_SETUP=false
@@ -149,6 +151,7 @@ EOF
   uv run aws-bench --account-config "$SCENARIO_ACCOUNT_CONFIG" run \
     -c "$JOB_CONFIG" \
     --path "$SCENARIO_PATH" \
+    --scenario-path "$DATASET_SCENARIOS_DIR" \
     --job-name "$JOB_NAME" \
     --jobs-dir "$JOBS_DIR" \
     --yes \
