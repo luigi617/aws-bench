@@ -6,17 +6,3 @@ cfn_role: cfn-service-execution
 accounts:
   ec2-multiregion:
     PRIMARY: "650387442903"
-  databases-and-storage:
-    PRIMARY: "650387442903"
-  compute-and-data:
-    PRIMARY: "650387442903"
-  troubleshooting-multiservice:
-    PRIMARY: "650387442903"
-  api-and-observability:
-    PRIMARY: "650387442903"
-  serverless-apps:
-    PRIMARY: "650387442903"
-  reference-architectures:
-    PRIMARY: "650387442903"
-  streaming-and-iot:
-    PRIMARY: "650387442903"

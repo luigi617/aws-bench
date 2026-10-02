@@ -28,6 +28,13 @@ done
 
 JOBS_DIR=$(grep '^jobs_dir:' "$JOB_CONFIG" | awk '{print $2}')
 BASE_JOB_NAME=$(grep '^job_name:' "$JOB_CONFIG" | awk '{print $2}')
+ACCOUNT_ID=$(grep 'PRIMARY:' "$ACCOUNT_CONFIG" | head -1 | awk '{print $2}' | tr -d '"')
+
+# Temporary per-scenario accounts.yaml (only one scenario mapped at a time)
+SCENARIO_ACCOUNT_CONFIG=$(mktemp /tmp/aws-bench-accounts-XXXXXX.yaml)
+trap 'rm -f "$SCENARIO_ACCOUNT_CONFIG"' EXIT
+RUNNER_ROLE=$(grep 'runner_role:' "$ACCOUNT_CONFIG" | awk '{print $2}')
+CFN_ROLE=$(grep 'cfn_role:' "$ACCOUNT_CONFIG" | awk '{print $2}')
 
 # Collect scenario directories matching the filter
 SCENARIOS=()
@@ -59,10 +66,22 @@ for scenario in "${SCENARIOS[@]}"; do
   echo "  Job:      $JOB_NAME"
   echo "========================================"
 
+  # Write a single-scenario accounts.yaml (framework disallows >1 scenario per account)
+  cat > "$SCENARIO_ACCOUNT_CONFIG" <<EOF
+schema_version: "1.0"
+mode: preexisting
+name: aws-bench-env
+runner_role: $RUNNER_ROLE
+cfn_role: $CFN_ROLE
+accounts:
+  $scenario:
+    PRIMARY: "$ACCOUNT_ID"
+EOF
+
   # 1. Environment setup
   if [[ "$SKIP_SETUP" == false ]]; then
     echo "--> env setup"
-    uv run aws-bench --account-config "$ACCOUNT_CONFIG" \
+    uv run aws-bench --account-config "$SCENARIO_ACCOUNT_CONFIG" \
       env setup \
       --env-name "$ENV_NAME" \
       --dataset "$DATASET" \
@@ -73,7 +92,7 @@ for scenario in "${SCENARIOS[@]}"; do
   # -c applies agent, concurrency, timeout, retry settings from job-config.yaml;
   # --path and --job-name override the dataset and job name for this scenario.
   echo "--> run"
-  uv run aws-bench --account-config "$ACCOUNT_CONFIG" run \
+  uv run aws-bench --account-config "$SCENARIO_ACCOUNT_CONFIG" run \
     -c "$JOB_CONFIG" \
     --path "$SCENARIO_PATH" \
     --job-name "$JOB_NAME" \
@@ -92,7 +111,7 @@ for scenario in "${SCENARIOS[@]}"; do
   # 4. Environment cleanup
   if [[ "$SKIP_CLEANUP" == false ]]; then
     echo "--> env cleanup"
-    uv run aws-bench --account-config "$ACCOUNT_CONFIG" \
+    uv run aws-bench --account-config "$SCENARIO_ACCOUNT_CONFIG" \
       env cleanup \
       --env-name "$ENV_NAME" \
       --dataset "$DATASET" \
