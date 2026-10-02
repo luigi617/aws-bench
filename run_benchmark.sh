@@ -55,6 +55,18 @@ JOBS_DIR=$(grep '^jobs_dir:' "$JOB_CONFIG" | awk '{print $2}')
 BASE_JOB_NAME=$(grep '^job_name:' "$JOB_CONFIG" | awk '{print $2}')
 ACCOUNT_ID=$(grep 'PRIMARY:' "$ACCOUNT_CONFIG" | head -1 | awk '{print $2}' | tr -d '"')
 
+# Ensure contamination state file exists (cleanup removes it; env setup requires it)
+CONTAMINATION_FILE="${HOME}/.aws-bench/state/aws-bench-env-contamination.json"
+mkdir -p "$(dirname "$CONTAMINATION_FILE")"
+[[ -f "$CONTAMINATION_FILE" ]] || echo '{"schema_version": "1.0", "contaminated_account_ids": []}' > "$CONTAMINATION_FILE"
+
+# Ensure baseline snapshot exists (required before env setup)
+SNAPSHOT_DIR="${HOME}/.aws-bench/state"
+if ! ls "$SNAPSHOT_DIR"/*-snapshot*.json &>/dev/null; then
+  echo "==> No baseline snapshot found — running env init..."
+  uv run aws-bench --account-config "$ACCOUNT_CONFIG" env init --env-name "$ENV_NAME"
+fi
+
 # Temporary per-scenario accounts.yaml (framework disallows >1 scenario per account)
 SCENARIO_ACCOUNT_CONFIG=$(mktemp /tmp/aws-bench-accounts-XXXXXX.yaml)
 trap 'rm -f "$SCENARIO_ACCOUNT_CONFIG"' EXIT
