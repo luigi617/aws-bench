@@ -578,7 +578,7 @@ async def test_shared_verifier_overlays_cred_env_on_config_verifier_env(
 ):
     """Verifier cred env is transiently overlaid on self.config.verifier.env.
 
-    The overlay (AWS_PROFILE + emptied raw creds, task env preserved) is present
+    The overlay (AWS_PROFILE + explicit session creds, task env preserved) is present
     DURING the super call (the override_env, HIGHEST-precedence layer), then
     restored so the persisted config never carries live creds.
     """
@@ -596,10 +596,12 @@ async def test_shared_verifier_overlays_cred_env_on_config_verifier_env(
     mocker.patch.object(Trial, "_run_shared_verifier", fake_super)
     await trial._run_shared_verifier(timeout_sec=None, user=None)
 
-    # The cred env was present for the verifier call: profile set, raw creds
-    # emptied, task env preserved alongside.
+    # The cred env was present for the verifier call: profile set, explicit session
+    # credentials injected (not blanked), task env preserved alongside.
     assert seen["AWS_PROFILE"] == "PRIMARY"
-    assert seen["AWS_ACCESS_KEY_ID"] == ""
+    assert seen["AWS_ACCESS_KEY_ID"] == "AKIA"
+    assert seen["AWS_SECRET_ACCESS_KEY"] == "secret"
+    assert seen["AWS_SESSION_TOKEN"] == "token"
     assert seen["REGION"] == "us-east-1"
     # ...and the original env is restored afterward (no live overlay persists).
     assert trial.config.verifier.env is original_env

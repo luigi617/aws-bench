@@ -212,13 +212,16 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
 
     async def _write_stage_credentials(
         self, role_type: RoleType, user: str | int | None
-    ) -> datetime:
-        """Mint off-loop, publish the files, and return their soonest expiry."""
+    ) -> tuple[datetime, dict[str, dict[str, object]]]:
+        """Mint off-loop, publish the files, and return (soonest expiry, payloads)."""
         payloads = await asyncio.to_thread(self._mint_all_tags, role_type)
         await self._exec_checked(
             command=_creds_write_command(payloads), user=user, action="write credential files"
         )
-        return min(datetime.fromisoformat(str(value["Expiration"])) for value in payloads.values())
+        expiry = min(
+            datetime.fromisoformat(str(value["Expiration"])) for value in payloads.values()
+        )
+        return expiry, payloads
 
     @contextlib.asynccontextmanager
     async def _staged_credentials(
@@ -231,21 +234,41 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
             )
         refresher: asyncio.Task[None] | None = None
         try:
-            expires_at = await self._write_stage_credentials(role_type, user)
+            expires_at, initial_payloads = await self._write_stage_credentials(role_type, user)
             await self._exec_checked(
                 command=_aws_config_write_command(self.config.account_mapping),
                 user=user,
                 action="write AWS config",
             )
+
+            async def _refresh_creds() -> datetime:
+                expiry, _ = await self._write_stage_credentials(role_type, user)
+                return expiry
+
             refresher = asyncio.create_task(
-                run_credential_refresh_loop(
-                    lambda: self._write_stage_credentials(role_type, user), expires_at, self.logger
-                )
+                run_credential_refresh_loop(_refresh_creds, expires_at, self.logger)
             )
-            cred_env: dict[str, str] = dict.fromkeys(_RAW_CRED_VARS, "")
             tag = next(iter(self.config.account_mapping))
-            cred_env["AWS_PROFILE"] = tag
-            cred_env["AWS_DEFAULT_PROFILE"] = tag
+            if role_type is RoleType.AGENT:
+                # For the agent phase blank out raw credential env vars so any host-forwarded
+                # AWS_* values (passed via docker exec -e by the agent runner) cannot outrank
+                # the profile-based credentials file. The agent refreshes via the file.
+                cred_env: dict[str, str] = dict.fromkeys(_RAW_CRED_VARS, "")
+                cred_env["AWS_PROFILE"] = tag
+                cred_env["AWS_DEFAULT_PROFILE"] = tag
+            else:
+                # For non-agent phases expose the actual minted session credentials directly.
+                # Libraries such as litellm check `key in os.environ` (true even for "") and
+                # treat any non-None value as a set credential; blank strings would cause AWS
+                # to return "invalid security token" on every Bedrock call in the verifier.
+                payload = initial_payloads[tag]
+                cred_env = {
+                    "AWS_PROFILE": tag,
+                    "AWS_DEFAULT_PROFILE": tag,
+                    "AWS_ACCESS_KEY_ID": str(payload["AccessKeyId"]),
+                    "AWS_SECRET_ACCESS_KEY": str(payload["SecretAccessKey"]),
+                    "AWS_SESSION_TOKEN": str(payload["SessionToken"]),
+                }
             # Script and verifier regions remain task-configured.
             if role_type is RoleType.AGENT:
                 cred_env["AWS_REGION"] = self.config.regions[0]

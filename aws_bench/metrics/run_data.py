@@ -222,6 +222,85 @@ _SCP_DENY_ARN_RE = re.compile(
 # Fallback: older error format without the ARN suffix.
 _SCP_DENY_PATTERN = "explicit deny in a service control policy"
 
+# AWS CLI invalid invocation error patterns
+_AWS_INVALID_PATTERNS = [
+    re.compile(r"Invalid choice: '"),
+    re.compile(r"Unknown options?: "),
+    re.compile(r"No such (?:command|option): "),
+    re.compile(r"Error: (?:No such|Unknown|Invalid) "),
+    re.compile(r"Unknown parameter in input"),
+    re.compile(r"unrecognized arguments"),
+    re.compile(r"aws: error: argument "),
+    re.compile(r"usage: aws.*\nerror:", re.DOTALL | re.IGNORECASE),
+]
+
+# AWS CLI verb classification
+_AWS_READ_VERBS = frozenset(
+    {
+        "describe",
+        "list",
+        "get",
+        "show",
+        "search",
+        "query",
+        "check",
+        "head",
+        "test",
+        "verify",
+        "validate",
+        "preview",
+        "scan",
+        "find",
+        "lookup",
+        "fetch",
+        "retrieve",
+        "view",
+    }
+)
+_AWS_WRITE_VERBS = frozenset(
+    {
+        "create",
+        "update",
+        "delete",
+        "put",
+        "add",
+        "attach",
+        "detach",
+        "remove",
+        "terminate",
+        "run",
+        "start",
+        "stop",
+        "reboot",
+        "modify",
+        "associate",
+        "disassociate",
+        "enable",
+        "disable",
+        "set",
+        "apply",
+        "deploy",
+        "register",
+        "deregister",
+        "allocate",
+        "release",
+        "import",
+        "export",
+        "restore",
+        "copy",
+        "move",
+        "grant",
+        "revoke",
+        "publish",
+        "subscribe",
+        "unsubscribe",
+        "reset",
+        "rotate",
+        "flush",
+        "purge",
+    }
+)
+
 
 def _contains_scp_deny(text: str) -> bool:
     """Return True if text contains an SCP deny error (ARN match preferred, string fallback)."""
@@ -422,6 +501,151 @@ def _security_metrics(
     return None, []
 
 
+def _aws_operation_key(command: str) -> str | None:
+    """Extract 'service subcommand' key from an aws CLI command string."""
+    m = re.search(r"aws\s+(?:--\S+\s+\S*\s*)*(\S+)(?:\s+([\w-]+))?", command)
+    if not m:
+        return None
+    service = m.group(1)
+    if service.startswith("-"):
+        return None
+    subcmd = m.group(2) or ""
+    if subcmd.startswith("-"):
+        subcmd = ""
+    return f"{service} {subcmd}".strip() if subcmd else service
+
+
+def _is_invalid_aws_invocation(text: str) -> bool:
+    """Return True if text contains an AWS CLI invalid-invocation error."""
+    return any(p.search(text) is not None for p in _AWS_INVALID_PATTERNS)
+
+
+def _get_observation_text(step: Step) -> str:
+    """Extract all text from a step's observation results as one string."""
+    if step.observation is None:
+        return ""
+    parts: list[str] = []
+    for result in step.observation.results:
+        content = result.content
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if part.type == "text" and part.text:
+                    parts.append(part.text)
+    return "\n".join(parts)
+
+
+def _aws_cli_metrics_from_trajectory(
+    trajectory: Trajectory | None,
+) -> dict[str, Any]:
+    """Compute AWS CLI-specific metrics from a trajectory.
+
+    Returns a dict with:
+      n_aws_cli_calls: total aws CLI invocations (bash calls containing 'aws ')
+      n_invalid_invocations: calls that produced invalid-invocation errors
+      error_repair_repaired: errors where agent retried same op successfully
+      error_repair_total: total tool errors on aws CLI calls
+      looked_before_change: True/False/None (None = no write calls observed)
+    """
+    if not trajectory:
+        return {
+            "n_aws_cli_calls": 0,
+            "n_invalid_invocations": 0,
+            "error_repair_repaired": 0,
+            "error_repair_total": 0,
+            "looked_before_change": None,
+        }
+
+    # Build sequence: (op_key | None, is_aws, is_write, is_read, is_tool_error, obs_text)
+    records: list[dict[str, object]] = []
+    for step in trajectory.steps:
+        for tool_call in step.tool_calls or []:
+            fn = str(tool_call.function_name or "")
+            if fn not in ("bash", "execute_bash"):
+                continue
+            args = tool_call.arguments or {}
+            command = str(args.get("command", args.get("cmd", "")))
+            is_aws = bool(re.search(r"aws\s+", command))
+            if not is_aws:
+                continue
+            op_key = _aws_operation_key(command)
+            subcmd = (op_key.split(" ", 1)[1] if op_key and " " in op_key else "").lower()
+            is_read = subcmd in _AWS_READ_VERBS
+            is_write = subcmd in _AWS_WRITE_VERBS
+            obs_text = _get_observation_text(step)
+            is_error = _is_tool_error(step, str(tool_call.tool_call_id or ""))
+            records.append(
+                {
+                    "op_key": op_key,
+                    "is_read": is_read,
+                    "is_write": is_write,
+                    "is_error": is_error,
+                    "obs_text": obs_text,
+                }
+            )
+
+    n_aws = len(records)
+    n_invalid = sum(1 for r in records if _is_invalid_aws_invocation(str(r["obs_text"])))
+
+    # Error-repair: for each errored call, check if a later call to same op succeeded
+    repaired = 0
+    total_errors = sum(1 for r in records if r["is_error"])
+    for i, r in enumerate(records):
+        if not r["is_error"] or r["op_key"] is None:
+            continue
+        for j in range(i + 1, len(records)):
+            if records[j]["op_key"] == r["op_key"] and not records[j]["is_error"]:
+                repaired += 1
+                break
+
+    # Look-before-change
+    first_write_idx = next((i for i, r in enumerate(records) if r["is_write"]), None)
+    if first_write_idx is None:
+        looked_before_change: bool | None = None
+    else:
+        looked_before_change = any(records[j]["is_read"] for j in range(first_write_idx))
+
+    return {
+        "n_aws_cli_calls": n_aws,
+        "n_invalid_invocations": n_invalid,
+        "error_repair_repaired": repaired,
+        "error_repair_total": total_errors,
+        "looked_before_change": looked_before_change,
+    }
+
+
+def _failure_step_tag(
+    aws_metrics: dict[str, Any],
+    n_tool_errors: int,
+    n_llm_calls: int,
+    reward: float | None,
+) -> str | None:
+    """Heuristic step-of-failure tag for a failed trial.
+
+    Returns None for passing trials. For failing trials returns one of:
+    discover | invoke | recover | interpret | verify_stop | continue
+    """
+    if reward is not None and reward >= 1.0:
+        return None
+    n_aws = int(aws_metrics.get("n_aws_cli_calls", 0) or 0)
+    n_invalid = int(aws_metrics.get("n_invalid_invocations", 0) or 0)
+    repaired = int(aws_metrics.get("error_repair_repaired", 0) or 0)
+    total_errors = int(aws_metrics.get("error_repair_total", 0) or 0)
+
+    if n_aws == 0:
+        return "discover"
+    if n_invalid > 0:
+        return "invoke"
+    if total_errors > 0 and repaired < total_errors:
+        return "recover"
+    if n_llm_calls > 15:
+        return "verify_stop"
+    if n_aws > 0 and n_tool_errors == 0:
+        return "interpret"
+    return "continue"
+
+
 # --- TrialData / RunData -----------------------------------------------------
 
 
@@ -439,6 +663,7 @@ class TrialData:
     _tool_metrics: dict[str, dict[str, float | int]] = field(init=False, repr=False)
     _security: tuple[float | None, list[dict[str, Any]]] = field(init=False, repr=False)
     _scp_deny_count: int = field(init=False, repr=False)
+    _aws_cli_metrics: dict[str, Any] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Compute cached derived values from trajectory."""
@@ -446,6 +671,7 @@ class TrialData:
         self._tool_metrics = _tool_metrics_from_trajectory(self.trajectory)
         self._security = _security_metrics(self.trajectory, self.raw_result)
         self._scp_deny_count = _scp_deny_count_from_trajectory(self.trajectory)
+        self._aws_cli_metrics = _aws_cli_metrics_from_trajectory(self.trajectory)
 
     # --- Identity ---
     @property
@@ -597,6 +823,41 @@ class TrialData:
     def scp_deny_count(self) -> int:
         """Return count of SCP access-denied errors in the trajectory."""
         return self._scp_deny_count
+
+    # --- AWS CLI metrics ---
+    @property
+    def n_aws_cli_calls(self) -> int:
+        """Return total number of AWS CLI invocations in the trajectory."""
+        return int(self._aws_cli_metrics.get("n_aws_cli_calls", 0) or 0)
+
+    @property
+    def n_invalid_invocations(self) -> int:
+        """Return number of AWS CLI calls that produced invalid-invocation errors."""
+        return int(self._aws_cli_metrics.get("n_invalid_invocations", 0) or 0)
+
+    @property
+    def error_repair_stats(self) -> tuple[int, int]:
+        """Return (repaired, total_errors) for AWS CLI error-repair tracking."""
+        return (
+            int(self._aws_cli_metrics.get("error_repair_repaired", 0) or 0),
+            int(self._aws_cli_metrics.get("error_repair_total", 0) or 0),
+        )
+
+    @property
+    def looked_before_change(self) -> bool | None:
+        """Return whether agent read before first write call; None if no writes."""
+        v = self._aws_cli_metrics.get("looked_before_change")
+        return bool(v) if v is not None else None
+
+    @property
+    def failure_step(self) -> str | None:
+        """Return heuristic step-of-failure tag, or None for passing trials."""
+        return _failure_step_tag(
+            self._aws_cli_metrics,
+            self.n_tool_errors,
+            self.n_llm_calls,
+            self.reward,
+        )
 
     # --- Latency ---
     @property

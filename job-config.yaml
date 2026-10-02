@@ -1,0 +1,46 @@
+# aws-bench job configuration
+# Usage: uv run aws-bench --account-config ./accounts.yaml run -c ./job-config.yaml
+
+# --- Job identity ---
+job_name: quickstart-run-01
+jobs_dir: jobs
+
+# --- Dataset ---
+dataset:
+  name: aws-bench-quickstart
+  # version: "0.7.0"        # pin a version; omit for latest
+  # path: ./local-tasks     # use a local task directory instead of registry
+
+# --- Environment ---
+env_name: aws-bench-env
+verify: true                  # pre-run drift check; set false to skip
+
+# --- Agent ---
+agents:
+  - name: claude-code
+    model_name: us.anthropic.claude-opus-5-5
+    env:
+      AWS_BEARER_TOKEN_BEDROCK: ""   # set via eval $(uv run aws-bench env creds --eval)
+    # kwargs:
+    #   marketplaces: ["anthropics/claude-plugins-official"]
+    #   plugins: ["aws-core@claude-plugins-official"]
+    # mcp_servers: []
+
+# --- Attempts & concurrency ---
+n_attempts: 1                 # attempts per task (needed for pass^k metrics)
+n_concurrent_trials: 5        # parallel trials at once
+
+# --- Timeouts ---
+timeout_multiplier: 1.0       # scale all timeouts
+# agent_timeout_multiplier: 2.0
+# verifier_timeout_multiplier: 1.5
+
+# --- Retries ---
+retry:
+  max_retries: 3
+  # include: []               # exception types to retry on
+  # exclude: []               # exception types to never retry
+
+# --- Output ---
+debug: false
+quiet: false
