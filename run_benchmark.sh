@@ -1,54 +1,95 @@
 #!/usr/bin/env bash
 # Full benchmark cycle: for each scenario, run setup → benchmark → metrics → cleanup.
-# Usage: ./run_benchmark.sh [--skip-setup] [--skip-cleanup] [--scenario PATTERN]
+# Usage:
+#   ./run_benchmark.sh                          # run all categories
+#   ./run_benchmark.sh ec2-multiregion          # run one category
+#   ./run_benchmark.sh ec2-multiregion serverless-apps  # run multiple
+#   ./run_benchmark.sh --list                   # show available categories
+#   ./run_benchmark.sh --skip-setup ec2-multiregion
+#   ./run_benchmark.sh --skip-cleanup ec2-multiregion
 set -euo pipefail
 
 ACCOUNT_CONFIG="./accounts.yaml"
 JOB_CONFIG="./job-config.yaml"
 DATASET="aws-bench-quickstart"
+DATASET_GIT_URL="https://github.com/aws-bench/aws-bench-datasets.git"
 ENV_NAME="aws-bench-env"
 
-# Dataset is downloaded here by aws-bench; adjust if your cache differs
-DATASET_TASKS_DIR="/tmp/aws-bench-datasets/tasks"
+# Local clone of the dataset repo — tasks/<scenario>/<task>/ is used for --path.
+# On first run the repo is cloned; subsequent runs do a git pull.
+DATASET_REPO_DIR="${HOME}/.aws-bench/datasets-repo"
+DATASET_TASKS_DIR="${DATASET_REPO_DIR}/tasks"
 
-# Parse flags
+# Parse flags and positional category names
 SKIP_SETUP=false
 SKIP_CLEANUP=false
-SCENARIO_FILTER="*"  # fnmatch glob; default = all
+LIST_ONLY=false
+SELECTED_CATEGORIES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-setup)   SKIP_SETUP=true ;;
     --skip-cleanup) SKIP_CLEANUP=true ;;
-    --scenario)     SCENARIO_FILTER="$2"; shift ;;
-    *) echo "Unknown flag: $1"; exit 1 ;;
+    --list)         LIST_ONLY=true ;;
+    --help|-h)
+      sed -n '2,8p' "$0" | sed 's/^# //'
+      exit 0 ;;
+    --*)
+      echo "Unknown flag: $1"; exit 1 ;;
+    *)
+      SELECTED_CATEGORIES+=("$1") ;;
   esac
   shift
 done
+
+# --- Ensure dataset repo is available ---
+if [[ ! -d "$DATASET_REPO_DIR/.git" ]]; then
+  echo "==> Cloning dataset repo to $DATASET_REPO_DIR ..."
+  git clone --depth=1 "$DATASET_GIT_URL" "$DATASET_REPO_DIR"
+else
+  echo "==> Updating dataset repo ..."
+  git -C "$DATASET_REPO_DIR" pull --quiet --ff-only
+fi
 
 JOBS_DIR=$(grep '^jobs_dir:' "$JOB_CONFIG" | awk '{print $2}')
 BASE_JOB_NAME=$(grep '^job_name:' "$JOB_CONFIG" | awk '{print $2}')
 ACCOUNT_ID=$(grep 'PRIMARY:' "$ACCOUNT_CONFIG" | head -1 | awk '{print $2}' | tr -d '"')
 
-# Temporary per-scenario accounts.yaml (only one scenario mapped at a time)
+# Temporary per-scenario accounts.yaml (framework disallows >1 scenario per account)
 SCENARIO_ACCOUNT_CONFIG=$(mktemp /tmp/aws-bench-accounts-XXXXXX.yaml)
 trap 'rm -f "$SCENARIO_ACCOUNT_CONFIG"' EXIT
 RUNNER_ROLE=$(grep 'runner_role:' "$ACCOUNT_CONFIG" | awk '{print $2}')
 CFN_ROLE=$(grep 'cfn_role:' "$ACCOUNT_CONFIG" | awk '{print $2}')
 
-# Collect scenario directories matching the filter
-SCENARIOS=()
-for scenario_dir in "$DATASET_TASKS_DIR"/*/; do
-  scenario=$(basename "$scenario_dir")
-  # shellcheck disable=SC2254
-  case "$scenario" in
-    $SCENARIO_FILTER) SCENARIOS+=("$scenario") ;;
-  esac
+# All available categories (from the cloned repo)
+ALL_CATEGORIES=()
+for d in "$DATASET_TASKS_DIR"/*/; do
+  ALL_CATEGORIES+=("$(basename "$d")")
 done
 
-if [[ ${#SCENARIOS[@]} -eq 0 ]]; then
-  echo "No scenarios matched filter: $SCENARIO_FILTER"
-  exit 1
+if [[ "$LIST_ONLY" == true ]]; then
+  echo "Available benchmark categories:"
+  for c in "${ALL_CATEGORIES[@]}"; do
+    task_count=$(ls "$DATASET_TASKS_DIR/$c" | wc -l | tr -d ' ')
+    echo "  $c  ($task_count tasks)"
+  done
+  exit 0
+fi
+
+# Validate and build the run list
+SCENARIOS=()
+if [[ ${#SELECTED_CATEGORIES[@]} -eq 0 ]]; then
+  SCENARIOS=("${ALL_CATEGORIES[@]}")
+else
+  for cat in "${SELECTED_CATEGORIES[@]}"; do
+    if [[ -d "$DATASET_TASKS_DIR/$cat" ]]; then
+      SCENARIOS+=("$cat")
+    else
+      echo "Unknown category: '$cat'"
+      echo "Run './run_benchmark.sh --list' to see available categories."
+      exit 1
+    fi
+  done
 fi
 
 echo "==> Running ${#SCENARIOS[@]} scenario(s): ${SCENARIOS[*]}"
