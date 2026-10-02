@@ -60,11 +60,12 @@ CONTAMINATION_FILE="${HOME}/.aws-bench/state/aws-bench-env-contamination.json"
 mkdir -p "$(dirname "$CONTAMINATION_FILE")"
 [[ -f "$CONTAMINATION_FILE" ]] || echo '{"schema_version": "1.0", "contaminated_account_ids": []}' > "$CONTAMINATION_FILE"
 
-# Ensure baseline snapshot exists (required before env setup)
-SNAPSHOT_DIR="${HOME}/.aws-bench/state"
-if ! ls "$SNAPSHOT_DIR"/*-snapshot*.json &>/dev/null; then
-  echo "==> No baseline snapshot found — running env init..."
-  uv run aws-bench --account-config "$ACCOUNT_CONFIG" env init --env-name "$ENV_NAME"
+# Ensure baseline snapshot exists (required before env setup).
+# Path: ~/.aws-bench/state/<env_name>/pre-setup/<account_id>/baseline.json
+BASELINE_FILE="${HOME}/.aws-bench/state/${ENV_NAME}/pre-setup/${ACCOUNT_ID}/baseline.json"
+if [[ ! -f "$BASELINE_FILE" ]]; then
+  echo "==> No baseline snapshot found — running env init (full account scan, takes ~5 min)..."
+  uv run aws-bench --account-config "$ACCOUNT_CONFIG" env init --env-name "$ENV_NAME" --dataset "$DATASET"
 fi
 
 # Temporary per-scenario accounts.yaml (framework disallows >1 scenario per account)
